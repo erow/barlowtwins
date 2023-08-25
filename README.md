@@ -38,13 +38,12 @@ PyTorch implementation of [Barlow Twins](https://arxiv.org/abs/2103.03230).
   </tr>
 </table>
 
-You can choose to download either the weights of the pretrained ResNet-50 network or the full checkpoint, which also contains the weights of the projector network and the state of the optimizer. 
 
-The pretrained model is also available on PyTorch Hub.
+The pretrained model is also available on `TODO`.
 
 ```
 import torch
-model = torch.hub.load('facebookresearch/barlowtwins:main', 'resnet50')
+# TODO
 ```
 
 ### Barlow Twins Training

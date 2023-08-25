@@ -136,14 +136,15 @@ def main_worker(gpu, args):
             scaler.update()
             if step % args.print_freq == 0:
                 if args.rank == 0:
-                    stats = dict(epoch=epoch, step=step,
+                    stats = dict(epoch=step/len(loader), step=step,
                                  lr_weights=optimizer.param_groups[0]['lr'],
+                                 lr_biases=optimizer.param_groups[1]['lr'],
                                  loss=loss.item(),
                                  time=int(time.time() - start_time))
                     print(json.dumps(stats))
                     print(json.dumps(stats), file=stats_file)
                 if run:
-                    run.log({"epoch":epoch,"step":step,"lr":optimizer.param_groups[0]['lr'],"loss":loss.item()})
+                    run.log(stats)
         if args.rank == 0 and epoch % 20 == 0:
             # save checkpoint
             state = dict(epoch=epoch + 1, model=model.state_dict(),
