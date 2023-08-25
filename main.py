@@ -142,8 +142,8 @@ def main_worker(gpu, args):
                                  time=int(time.time() - start_time))
                     print(json.dumps(stats))
                     print(json.dumps(stats), file=stats_file)
-            if run:
-                run.log({"epoch":epoch,"step":step,"lr":optimizer.param_groups[0]['lr'],"loss":loss.item()})
+                if run:
+                    run.log({"epoch":epoch,"step":step,"lr":optimizer.param_groups[0]['lr'],"loss":loss.item()})
         if args.rank == 0 and epoch % 20 == 0:
             # save checkpoint
             state = dict(epoch=epoch + 1, model=model.state_dict(),
