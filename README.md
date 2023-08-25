@@ -5,7 +5,7 @@ Barlow Twins: Self-Supervised Learning via Redundancy Reduction
   <img width="500" alt="Screen Shot 2021-04-29 at 6 26 48 AM" src="https://user-images.githubusercontent.com/14848164/120419539-b0fab900-c330-11eb-8536-126ce6ce7b85.png">
 </p>
 
-PyTorch implementation of [Barlow Twins](https://arxiv.org/abs/2103.03230).
+PyTorch implementation of [Barlow Twins](https://arxiv.org/abs/2103.03230) with Vision Transformer.
 
 ```
 @article{zbontar2021barlow,
@@ -15,6 +15,12 @@ PyTorch implementation of [Barlow Twins](https://arxiv.org/abs/2103.03230).
   year={2021}
 }
 ```
+### Update
+
+1. backbone: resnet50->vit_base
+2. optimizer: LARS -> AdamW
+3. logger: wandb
+
 
 ### Pretrained Model
 
@@ -53,7 +59,7 @@ Install PyTorch and download ImageNet by following the instructions in the [requ
 Our best model is obtained by running the following command:
 
 ```
-python main.py /path/to/imagenet/
+WANDB_ENTITY=<> python main.py /path/to/imagenet/
 ```
 
 Training time is approximately 7 days on 16 v100 GPUs.
