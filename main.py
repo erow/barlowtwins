@@ -130,7 +130,7 @@ def main_worker(gpu, args):
             adjust_learning_rate(args, optimizer, loader, step)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                loss = model.forward(y1, y2)
+                loss = model(y1, y2)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -142,11 +142,10 @@ def main_worker(gpu, args):
                                  time=int(time.time() - start_time))
                     print(json.dumps(stats))
                     print(json.dumps(stats), file=stats_file)
-            if run == 0:
+            if run:
                 run.log({"epoch":epoch,"step":step,"lr":optimizer.param_groups[0]['lr'],"loss":loss.item()})
         if args.rank == 0 and epoch % 20 == 0:
             # save checkpoint
-            
             state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
             torch.save(state, args.output_dir / f'checkpoint_{epoch+1}.pth')
@@ -168,8 +167,9 @@ def adjust_learning_rate(args, optimizer, loader, step):
         q = 0.5 * (1 + math.cos(math.pi * step / max_steps))
         end_lr = base_lr * 0.001
         lr = base_lr * q + end_lr * (1 - q)
-    lr = max(lr, 1e-6)
+    lr = max(lr, 1e-3)
     optimizer.param_groups[0]['lr'] = lr * args.learning_rate_weights
+    optimizer.param_groups[1]['lr'] = lr * args.learning_rate_biases
 
 
 def handle_sigusr1(signum, frame):
