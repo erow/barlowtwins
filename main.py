@@ -45,7 +45,7 @@ parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--output_dir', default='./outputs/', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
-
+parser.add_argument('--head', default=False, action='store_true',)
 
 def main():
     args = parser.parse_args()
@@ -69,6 +69,7 @@ def main():
         args.dist_url = 'tcp://localhost:58472'
         args.world_size = args.ngpus_per_node
     torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
+    # main_worker(0, args)
 
 
 def main_worker(gpu, args):
@@ -87,6 +88,11 @@ def main_worker(gpu, args):
     torch.backends.cudnn.benchmark = True
 
     model = BarlowTwins(args).cuda(gpu)
+    if args.head:
+        head = model.head
+    else:
+        head = nn.Identity()
+    model.head = None
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     param_weights = []
     param_biases = []
@@ -96,6 +102,8 @@ def main_worker(gpu, args):
         else:
             param_weights.append(param)
     parameters = [{'params': param_weights}, {'params': param_biases}]
+    
+    model.head = head
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
     optimizer = optim.AdamW(parameters, lr=1, weight_decay=args.weight_decay)
 
@@ -104,11 +112,14 @@ def main_worker(gpu, args):
         ckpt = torch.load(args.output_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
-        model.load_state_dict(ckpt['model'],strict=False)
-        optimizer.load_state_dict(ckpt['optimizer'],strict=False)
+        print("load model:", model.load_state_dict(ckpt['model'],False))
+        print("load optimizer:", optimizer.load_state_dict(ckpt['optimizer']))
     else:
         start_epoch = 0
-
+    model.module.head = head
+    optimizer.add_param_group({'params': head.parameters(),'lr':1e-5})
+    
+    
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
     sampler = torch.utils.data.distributed.DistributedSampler(dataset)
     args.batch_size = args.batch_size * args.world_size
@@ -120,6 +131,7 @@ def main_worker(gpu, args):
     run = None
     if args.rank == 0:
         run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
+        pass
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
     for epoch in range(start_epoch, args.epochs):
@@ -131,6 +143,11 @@ def main_worker(gpu, args):
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
                 loss, metric = model(y1, y2)
+            if torch.isnan(loss):
+                state = dict(epoch=epoch + 1, model=model.state_dict(),
+                         optimizer=optimizer.state_dict())
+                torch.save(state, args.output_dir / f'error_{epoch+1}.pth')
+                raise ValueError('NaN loss')
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -153,7 +170,7 @@ def main_worker(gpu, args):
     if args.rank == 0:
         # save final model
         torch.save(model.module.backbone.state_dict(),
-                   args.output_dir / 'checkpoint.pth')
+                   args.output_dir / 'model.pth')
 
 
 def adjust_learning_rate(args, optimizer, loader, step):
@@ -205,6 +222,7 @@ class BarlowTwins(nn.Module):
             layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Linear(sizes[-2], sizes[-1], bias=False))
         self.projector = nn.Sequential(*layers)
+        self.head = nn.Linear(sizes[-1], 256, bias=False)
 
         # normalization layer for the representations z1 and z2
         self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
@@ -212,6 +230,8 @@ class BarlowTwins(nn.Module):
     def forward(self, y1, y2):
         z1 = self.projector(self.backbone(y1))
         z2 = self.projector(self.backbone(y2))
+        z1 = self.head(z1)
+        z2 = self.head(z2)
 
         # empirical cross-correlation matrix
         c = self.bn(z1).T @ self.bn(z2)
