@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+import torch.distributed as dist
 
 from PIL import Image, ImageOps, ImageFilter
 from torch import nn, optim
@@ -63,6 +64,11 @@ def main():
         args.rank = int(os.getenv('SLURM_NODEID')) * args.ngpus_per_node
         args.world_size = int(os.getenv('SLURM_NNODES')) * args.ngpus_per_node
         args.dist_url = f'tcp://{host_name}:58472'
+    elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.gpu = int(os.environ['LOCAL_RANK'])
+        args.dist_url = 'env://'
     else:
         # single-node distributed training
         args.rank = 0
@@ -71,14 +77,26 @@ def main():
     torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
     # main_worker(0, args)
 
+def is_dist_avail_and_initialized():
+    if not dist.is_available():
+        return False
+    if not dist.is_initialized():
+        return False
+    return True
+
+def get_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
 
 def main_worker(gpu, args):
     args.rank += gpu
     torch.distributed.init_process_group(
         backend='nccl', init_method=args.dist_url,
         world_size=args.world_size, rank=args.rank)
-
-    if args.rank == 0:
+    print(args)
+    if get_rank() == 0:
+        
         args.output_dir.mkdir(parents=True, exist_ok=True)
         stats_file = open(args.output_dir / 'stats.txt', 'a', buffering=1)
         print(' '.join(sys.argv))
@@ -121,7 +139,7 @@ def main_worker(gpu, args):
     
     
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset,shuffle=True)
     args.batch_size = args.batch_size * args.world_size
     per_device_batch_size = args.batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
@@ -129,14 +147,15 @@ def main_worker(gpu, args):
         pin_memory=True, sampler=sampler)
 
     run = None
-    if args.rank == 0:
-        run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
+    if get_rank() == 0:
+        # run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
         pass
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
     for epoch in range(start_epoch, args.epochs):
         sampler.set_epoch(epoch)
         for step, ((y1, y2), _) in enumerate(loader, start=epoch * len(loader)):
+            
             y1 = y1.cuda(gpu, non_blocking=True)
             y2 = y2.cuda(gpu, non_blocking=True)
             adjust_learning_rate(args, optimizer, loader, step)
@@ -152,7 +171,7 @@ def main_worker(gpu, args):
             scaler.step(optimizer)
             scaler.update()
             if step % args.print_freq == 0:
-                if args.rank == 0:
+                if get_rank() == 0:
                     stats = dict(epoch=step/len(loader), step=step,
                                  lr_weights=optimizer.param_groups[0]['lr'],
                                  lr_biases=optimizer.param_groups[1]['lr'],
@@ -162,12 +181,12 @@ def main_worker(gpu, args):
                     print(json.dumps(stats), file=stats_file)
                 if run:
                     run.log(stats)
-        if args.rank == 0 and epoch % 20 == 0:
+        if get_rank() == 0 and epoch % 20 == 0:
             # save checkpoint
             state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
             torch.save(state, args.output_dir / f'checkpoint_{epoch+1}.pth')
-    if args.rank == 0:
+    if get_rank() == 0:
         # save final model
         torch.save(model.module.backbone.state_dict(),
                    args.output_dir / 'model.pth')
@@ -222,10 +241,14 @@ class BarlowTwins(nn.Module):
             layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Linear(sizes[-2], sizes[-1], bias=False))
         self.projector = nn.Sequential(*layers)
+        
         self.head = nn.Linear(sizes[-1], 256, bias=False)
 
         # normalization layer for the representations z1 and z2
-        self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
+        if args.head:
+            self.bn = nn.SyncBatchNorm(256, affine=False)
+        else:
+            self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
 
     def forward(self, y1, y2):
         z1 = self.projector(self.backbone(y1))
@@ -243,7 +266,7 @@ class BarlowTwins(nn.Module):
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
         loss = on_diag + self.args.lambd * off_diag
-        return loss,{'on_diag':on_diag,'off_diag':off_diag}
+        return loss,{'on_diag':on_diag.item(),'off_diag':off_diag.item()}
 
 
 class LARS(optim.Optimizer):
