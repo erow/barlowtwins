@@ -130,7 +130,7 @@ def main_worker(gpu, args):
             adjust_learning_rate(args, optimizer, loader, step)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                loss = model(y1, y2)
+                loss, metric = model(y1, y2)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -140,7 +140,7 @@ def main_worker(gpu, args):
                                  lr_weights=optimizer.param_groups[0]['lr'],
                                  lr_biases=optimizer.param_groups[1]['lr'],
                                  loss=loss.item(),
-                                 time=int(time.time() - start_time))
+                                 time=int(time.time() - start_time),**metric)
                     print(json.dumps(stats))
                     print(json.dumps(stats), file=stats_file)
                 if run:
@@ -223,7 +223,7 @@ class BarlowTwins(nn.Module):
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
         loss = on_diag + self.args.lambd * off_diag
-        return loss
+        return loss,{'on_diag':on_diag,'off_diag':off_diag}
 
 
 class LARS(optim.Optimizer):
