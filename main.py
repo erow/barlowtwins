@@ -104,8 +104,8 @@ def main_worker(gpu, args):
         ckpt = torch.load(args.output_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
+        model.load_state_dict(ckpt['model'],strict=False)
+        optimizer.load_state_dict(ckpt['optimizer'],strict=False)
     else:
         start_epoch = 0
 
