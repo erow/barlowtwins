@@ -148,7 +148,7 @@ def main_worker(gpu, args):
 
     run = None
     if get_rank() == 0:
-        # run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
+        run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
         pass
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
