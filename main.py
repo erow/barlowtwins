@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from pathlib import Path
-import wandb
+
 import argparse
 import json
 import math
@@ -96,7 +96,6 @@ def main_worker(gpu, args):
         world_size=args.world_size, rank=args.rank)
     print(args)
     if get_rank() == 0:
-        
         args.output_dir.mkdir(parents=True, exist_ok=True)
         stats_file = open(args.output_dir / 'stats.txt', 'a', buffering=1)
         print(' '.join(sys.argv))
@@ -130,6 +129,9 @@ def main_worker(gpu, args):
         ckpt = torch.load(args.output_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
+        for key in {'module.bn.running_mean', 'module.bn.running_var'}:
+            del ckpt['model'][key]
+            
         print("load model:", model.load_state_dict(ckpt['model'],False))
         print("load optimizer:", optimizer.load_state_dict(ckpt['optimizer']))
     else:
@@ -148,6 +150,7 @@ def main_worker(gpu, args):
 
     run = None
     if get_rank() == 0:
+        import wandb
         run = wandb.init(project="ssl",name="barlowtwins",job_type="pretrain")
         pass
     start_time = time.time()
