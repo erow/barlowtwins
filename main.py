@@ -32,7 +32,7 @@ parser.add_argument('--epochs', default=1000, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--batch-size', default=64, type=int, metavar='N',
                     help='mini-batch size')
-parser.add_argument('--learning-rate-weights', default=5e-4, type=float, metavar='LR',
+parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
 parser.add_argument('--learning-rate-biases', default=0.0048, type=float, metavar='LR',
                     help='base learning rate for biases and batch norm parameters')
@@ -105,11 +105,6 @@ def main_worker(gpu, args):
     torch.backends.cudnn.benchmark = True
 
     model = BarlowTwins(args).cuda(gpu)
-    if args.head:
-        head = model.head
-    else:
-        head = nn.Identity()
-    model.head = None
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     param_weights = []
     param_biases = []
@@ -120,29 +115,29 @@ def main_worker(gpu, args):
             param_weights.append(param)
     parameters = [{'params': param_weights}, {'params': param_biases}]
     
-    model.head = head
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
-    optimizer = optim.AdamW(parameters, lr=1, weight_decay=args.weight_decay)
+
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu],static_graph=True)
+    optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
+                     weight_decay_filter=True,
+                     lars_adaptation_filter=True)
 
     # automatically resume from checkpoint if it exists
     if (args.output_dir / 'checkpoint.pth').is_file():
         ckpt = torch.load(args.output_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
-        for key in {'module.bn.running_mean', 'module.bn.running_var'}:
-            del ckpt['model'][key]
+        # for key in {'module.bn.running_mean', 'module.bn.running_var'}:
+        #     del ckpt['model'][key]
             
         print("load model:", model.load_state_dict(ckpt['model'],False))
         print("load optimizer:", optimizer.load_state_dict(ckpt['optimizer']))
     else:
         start_epoch = 0
-    model.module.head = head
-    optimizer.add_param_group({'params': head.parameters(),'lr':1e-5})
     
     
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
     sampler = torch.utils.data.distributed.DistributedSampler(dataset,shuffle=True)
-    args.batch_size = args.batch_size * args.world_size
+    
     per_device_batch_size = args.batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=per_device_batch_size, num_workers=args.workers,
@@ -189,10 +184,11 @@ def main_worker(gpu, args):
             state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
             torch.save(state, args.output_dir / f'checkpoint_{epoch+1}.pth')
+            torch.save(state, args.output_dir / f'checkpoint.pth')
     if get_rank() == 0:
         # save final model
         torch.save(model.module.backbone.state_dict(),
-                   args.output_dir / 'model.pth')
+                   args.output_dir / 'weights.pth')
 
 
 def adjust_learning_rate(args, optimizer, loader, step):
@@ -227,13 +223,15 @@ def off_diagonal(x):
     assert n == m
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
-from vision_transformer import vit_base
-# from timm.models.vision_transformer import vit_base_patch16_224
+# from vision_transformer import vit_base
+from timm.models.vision_transformer import vit_base_patch16_224
 class BarlowTwins(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.backbone = vit_base(num_classes=0)
+        
+        self.backbone = vit_base_patch16_224(num_classes=0,)
+        self.backbone.set_grad_checkpointing(True)
 
         # projector
         sizes = [self.backbone.embed_dim] + list(map(int, args.projector.split('-')))
@@ -245,19 +243,13 @@ class BarlowTwins(nn.Module):
         layers.append(nn.Linear(sizes[-2], sizes[-1], bias=False))
         self.projector = nn.Sequential(*layers)
         
-        self.head = nn.Linear(sizes[-1], 256, bias=False)
 
         # normalization layer for the representations z1 and z2
-        if args.head:
-            self.bn = nn.SyncBatchNorm(256, affine=False)
-        else:
-            self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
+        self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
 
     def forward(self, y1, y2):
         z1 = self.projector(self.backbone(y1))
         z2 = self.projector(self.backbone(y2))
-        z1 = self.head(z1)
-        z2 = self.head(z2)
 
         # empirical cross-correlation matrix
         c = self.bn(z1).T @ self.bn(z2)
@@ -295,6 +287,8 @@ class LARS(optim.Optimizer):
 
                 if not g['weight_decay_filter'] or not self.exclude_bias_and_norm(p):
                     dp = dp.add(p, alpha=g['weight_decay'])
+                else:
+                    pass
 
                 if not g['lars_adaptation_filter'] or not self.exclude_bias_and_norm(p):
                     param_norm = torch.norm(p)
